@@ -1,39 +1,83 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from ai_engine.llama_generator import LlamaWebGenerator
+from ai_engine.code_parser import CodeParser
+from database.db_manager import DatabaseManager
+import os
 
-from config import settings
-from models import Base, engine
-from routes.api import router as api_router
+app = Flask(__name__)
+CORS(app)
 
+# Initialize components
+llama_gen = LlamaWebGenerator()
+db = DatabaseManager()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Create database tables on startup."""
-    Base.metadata.create_all(bind=engine)
-    yield
+def analyze_prompt(prompt):
+    """Basic analysis of the prompt to determine website type."""
+    prompt_lower = prompt.lower()
+    if "landing page" in prompt_lower:
+        return "landing_page"
+    elif "portfolio" in prompt_lower:
+        return "portfolio"
+    elif "blog" in prompt_lower:
+        return "blog"
+    elif "ecommerce" in prompt_lower or "shop" in prompt_lower:
+        return "ecommerce"
+    return "generic"
 
+def parse_and_structure(generated_text):
+    """Parse the raw generated text into structured code."""
+    return {
+        "html_code": CodeParser.extract_html(generated_text),
+        "css_code": CodeParser.extract_css(generated_text),
+        "js_code": CodeParser.extract_js(generated_text),
+        "metadata": {}
+    }
 
-app = FastAPI(
-    title="AI Website Generator",
-    description="Generate websites from natural language prompts using Llama 2",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+@app.route('/api/generate', methods=['POST'])
+def generate_website():
+    try:
+        data = request.json
+        user_prompt = data.get('prompt')
+        
+        if not user_prompt:
+            return jsonify({'error': 'Prompt is required'}), 400
+        
+        # Analyze prompt to determine website type
+        website_type = analyze_prompt(user_prompt)
+        
+        # Generate components
+        # Append website type to context to guide generation
+        context_prompt = f"Type: {website_type}. {user_prompt}"
+        html = llama_gen.generate_code(context_prompt, "full website")
+        
+        # Parse and structure code
+        structured_code = parse_and_structure(html)
+        
+        # Save to database
+        project_id = db.save_project(user_prompt, structured_code)
+        
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'code': structured_code
+        })
+    except Exception as e:
+        print(f"Error generating website: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.route('/api/preview/<project_id>', methods=['GET'])
+def preview_website(project_id):
+    project = db.get_project(project_id)
+    if project:
+        return jsonify(project)
+    return jsonify({'error': 'Project not found'}), 404
 
-# Routes
-app.include_router(api_router, prefix="/api")
+@app.route('/api/export/<project_id>', methods=['GET'])
+def export_website(project_id):
+    # Generate downloadable zip file (placeholder)
+    return jsonify({'message': 'Export functionality coming soon'})
 
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, port=port)
